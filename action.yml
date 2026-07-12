@@ -7,7 +7,7 @@ branding:
 
 inputs:
   token:
-    description: "BenchModel personal API token (bm_...). Store it as a repo secret and pass via ${{ secrets.BENCHMODEL_TOKEN }}."
+    description: "BenchModel personal API token (bm_...). Store it as a repo secret named BENCHMODEL_TOKEN and pass that secret in as this input."
     required: true
   model:
     description: "Reviewer model id (e.g. claude-sonnet-4-6, gpt-5.6, gemini-3.1-pro-preview, deepseek-v4-pro). Uses your BenchModel-stored key for that provider."

@@ -42,6 +42,7 @@ runs:
         BM_MAX: ${{ inputs.max-chars }}
         BM_FAILON: ${{ inputs.fail-on }}
         GH_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
         set -euo pipefail
@@ -50,9 +51,9 @@ runs:
           exit 0
         fi
 
-        echo "Fetching diff for PR #$PR_NUMBER ..."
-        gh pr diff "$PR_NUMBER" > /tmp/bm_diff.txt || {
-          echo "Could not read PR diff (need a pull_request event and contents: read)."; exit 0;
+        echo "Fetching diff for PR #$PR_NUMBER in $GH_REPO ..."
+        gh pr diff "$PR_NUMBER" --repo "$GH_REPO" > /tmp/bm_diff.txt || {
+          echo "Could not read PR diff for #$PR_NUMBER in $GH_REPO. The workflow needs 'contents: read' (and 'pull-requests: read')."; exit 1;
         }
 
         SIZE=$(wc -c < /tmp/bm_diff.txt | tr -d ' ')
@@ -74,14 +75,12 @@ runs:
 
         if [ "$HTTP" != "200" ]; then
           echo "BenchModel returned HTTP $HTTP:"; cat /tmp/bm_resp.json;
-          # A 4xx here usually means a bad/expired token, no stored provider key, or an oversized diff.
           exit 1
         fi
 
         N=$(jq '.findings | length' /tmp/bm_resp.json)
         echo "Findings: $N"
 
-        # ---- build the PR comment ----
         {
           echo "## 🤖 BenchModel review — \`$BM_MODEL\`"
           echo ""
@@ -104,9 +103,10 @@ runs:
           echo "<sub>Reviewed by <a href=\"https://benchmodel.io\">BenchModel</a>. Model chosen by you; run keyless at benchmodel.io/try.</sub>"
         } > /tmp/bm_comment.md
 
-        gh pr comment "$PR_NUMBER" --body-file /tmp/bm_comment.md || echo "Could not post comment (need pull-requests: write)."
+        gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body-file /tmp/bm_comment.md || {
+          echo "Could not post the review comment. The workflow must grant 'pull-requests: write'."; exit 1;
+        }
 
-        # ---- optional gate ----
         if [ "$BM_FAILON" = "none" ]; then exit 0; fi
         if [ "$BM_FAILON" = "high" ]; then
           HITS=$(jq '[.findings[] | select((.severity//""|ascii_downcase)=="high")] | length' /tmp/bm_resp.json)

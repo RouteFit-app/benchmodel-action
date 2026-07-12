@@ -1,0 +1,19 @@
+# Copy this file to .github/workflows/benchmodel.yml in your repo.
+name: BenchModel review
+on:
+  pull_request:
+
+permissions:
+  contents: read # read the PR diff
+  pull-requests: write # post the review comment
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: RouteFit-app/benchmodel-action@v1
+        with:
+          token: ${{ secrets.BENCHMODEL_TOKEN }}
+          model: claude-sonnet-4-6
+          # fail-on: high        # uncomment to block merges on high-severity findings
+          # max-chars: "60000"   # raise to review bigger diffs

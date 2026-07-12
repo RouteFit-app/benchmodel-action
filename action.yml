@@ -1,0 +1,120 @@
+name: "BenchModel AI Code Review"
+description: "Review a pull request's diff with BenchModel and post the findings as a PR comment. Optionally fail the check on high-severity issues."
+author: "BenchModel"
+branding:
+  icon: "check-circle"
+  color: "purple"
+
+inputs:
+  token:
+    description: "BenchModel personal API token (bm_...). Store it as a repo secret and pass via ${{ secrets.BENCHMODEL_TOKEN }}."
+    required: true
+  model:
+    description: "Reviewer model id (e.g. claude-sonnet-4-6, gpt-5.6, gemini-3.1-pro-preview, deepseek-v4-pro). Uses your BenchModel-stored key for that provider."
+    required: false
+    default: "claude-sonnet-4-6"
+  api-url:
+    description: "BenchModel API base URL."
+    required: false
+    default: "https://benchmodel-production.up.railway.app"
+  max-chars:
+    description: "Skip review if the diff is larger than this many characters (keeps cost/latency bounded)."
+    required: false
+    default: "60000"
+  fail-on:
+    description: "Fail the check if a finding at this severity or higher is found: 'high', 'medium', or 'none' (comment only, never fail)."
+    required: false
+    default: "none"
+  github-token:
+    description: "Token used to read the PR diff and post the comment. Defaults to the workflow's GITHUB_TOKEN."
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: BenchModel review
+      shell: bash
+      env:
+        BM_TOKEN: ${{ inputs.token }}
+        BM_MODEL: ${{ inputs.model }}
+        BM_API: ${{ inputs.api-url }}
+        BM_MAX: ${{ inputs.max-chars }}
+        BM_FAILON: ${{ inputs.fail-on }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        if [ -z "${PR_NUMBER:-}" ]; then
+          echo "No pull_request in context; this action runs on pull_request events. Skipping."
+          exit 0
+        fi
+
+        echo "Fetching diff for PR #$PR_NUMBER ..."
+        gh pr diff "$PR_NUMBER" > /tmp/bm_diff.txt || {
+          echo "Could not read PR diff (need a pull_request event and contents: read)."; exit 0;
+        }
+
+        SIZE=$(wc -c < /tmp/bm_diff.txt | tr -d ' ')
+        if [ "$SIZE" -eq 0 ]; then echo "Empty diff, nothing to review."; exit 0; fi
+        if [ "$SIZE" -gt "$BM_MAX" ]; then
+          echo "Diff is $SIZE chars (> max $BM_MAX). Skipping review to bound cost. Raise 'max-chars' to include it."
+          exit 0
+        fi
+
+        echo "Requesting review from $BM_MODEL ($SIZE chars) ..."
+        jq -Rs --arg m "$BM_MODEL" \
+          '{reviewer_ai:$m, writer_summary:"Automated pull-request review via GitHub Action", output:.}' \
+          < /tmp/bm_diff.txt > /tmp/bm_body.json
+
+        HTTP=$(curl -sS -o /tmp/bm_resp.json -w "%{http_code}" -X POST "$BM_API/api/reviews" \
+          -H "Authorization: Bearer $BM_TOKEN" \
+          -H "Content-Type: application/json" \
+          --data @/tmp/bm_body.json) || { echo "Request to BenchModel failed."; exit 1; }
+
+        if [ "$HTTP" != "200" ]; then
+          echo "BenchModel returned HTTP $HTTP:"; cat /tmp/bm_resp.json;
+          # A 4xx here usually means a bad/expired token, no stored provider key, or an oversized diff.
+          exit 1
+        fi
+
+        N=$(jq '.findings | length' /tmp/bm_resp.json)
+        echo "Findings: $N"
+
+        # ---- build the PR comment ----
+        {
+          echo "## 🤖 BenchModel review — \`$BM_MODEL\`"
+          echo ""
+          SUM=$(jq -r '.summary // ""' /tmp/bm_resp.json)
+          [ -n "$SUM" ] && { echo "$SUM"; echo ""; }
+          if [ "$N" -eq 0 ]; then
+            echo "No issues found in this diff. ✅"
+          else
+            echo "| Severity | Location | Issue |"
+            echo "|---|---|---|"
+            jq -r '.findings[] | "| \(.severity // "?") | `\(.file // "?"):\(.line_range // "?")` | \(.issue // "" | gsub("\n";" ") | gsub("\\|";"\\\\|")) |"' /tmp/bm_resp.json
+            echo ""
+            echo "<details><summary>Suggested fixes</summary>"
+            echo ""
+            jq -r '.findings[] | "- **\(.file // "?"):\(.line_range // "?")** — \(.suggested_fix // "" | gsub("\n";" "))"' /tmp/bm_resp.json
+            echo ""
+            echo "</details>"
+          fi
+          echo ""
+          echo "<sub>Reviewed by <a href=\"https://benchmodel.io\">BenchModel</a>. Model chosen by you; run keyless at benchmodel.io/try.</sub>"
+        } > /tmp/bm_comment.md
+
+        gh pr comment "$PR_NUMBER" --body-file /tmp/bm_comment.md || echo "Could not post comment (need pull-requests: write)."
+
+        # ---- optional gate ----
+        if [ "$BM_FAILON" = "none" ]; then exit 0; fi
+        if [ "$BM_FAILON" = "high" ]; then
+          HITS=$(jq '[.findings[] | select((.severity//""|ascii_downcase)=="high")] | length' /tmp/bm_resp.json)
+        else
+          HITS=$(jq '[.findings[] | select((.severity//""|ascii_downcase)=="high" or (.severity//""|ascii_downcase)=="medium")] | length' /tmp/bm_resp.json)
+        fi
+        if [ "$HITS" -gt 0 ]; then
+          echo "Failing check: $HITS finding(s) at severity >= $BM_FAILON."
+          exit 1
+        fi
+        echo "No findings at or above '$BM_FAILON'. Check passes."

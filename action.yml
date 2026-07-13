@@ -64,17 +64,14 @@ runs:
         fi
 
         echo "Requesting review from $BM_MODEL ($SIZE chars) ..."
-        jq -Rs --arg m "$BM_MODEL" \
-          '{reviewer_ai:$m, writer_summary:"Automated pull-request review via GitHub Action", output:.}' \
-          < /tmp/bm_diff.txt > /tmp/bm_body.json
+        python3 -c "import json,sys; d=open('/tmp/bm_diff.txt',encoding='utf-8',errors='replace').read(); sys.stdout.write(json.dumps({'reviewer_ai':sys.argv[1],'writer_summary':'Automated pull-request review via GitHub Action','output':d}))" "$BM_MODEL" > /tmp/bm_body.json
 
         BODY_BYTES=$(wc -c < /tmp/bm_body.json | tr -d ' ')
         echo "Request body: ${BODY_BYTES} bytes"
-        if ! jq -e . /tmp/bm_body.json >/dev/null 2>&1; then
-          echo "Built an invalid or empty request body (jq produced nothing usable). Aborting."
-          echo "First 200 bytes of the fetched diff:"; head -c 200 /tmp/bm_diff.txt; echo
-          exit 1
-        fi
+        python3 -c "import json;json.load(open('/tmp/bm_body.json'))" 2>/tmp/bm_jsonerr || {
+          echo "Request body is not valid JSON per Python:"; cat /tmp/bm_jsonerr;
+          echo "First 200 bytes:"; head -c 200 /tmp/bm_body.json; echo; exit 1;
+        }
 
         HTTP=$(curl -sS -o /tmp/bm_resp.json -w "%{http_code}" -X POST "$BM_API/api/reviews" \
           -H "Authorization: Bearer $BM_TOKEN" \

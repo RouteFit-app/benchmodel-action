@@ -73,16 +73,26 @@ runs:
           echo "First 200 bytes:"; head -c 200 /tmp/bm_body.json; echo; exit 1;
         }
 
-        HTTP=$(curl -sS -o /tmp/bm_resp.json -w "%{http_code}" -X POST "$BM_API/api/reviews" \
+        HTTP=$(curl -sS --http1.1 -H "Expect:" -o /tmp/bm_resp.json -w "%{http_code}" -X POST "$BM_API/api/reviews" \
           -H "Authorization: Bearer $BM_TOKEN" \
           -H "Content-Type: application/json" \
           --data-binary @/tmp/bm_body.json) || { echo "Request to BenchModel failed."; exit 1; }
 
         if [ "$HTTP" != "200" ]; then
-          echo "BenchModel returned HTTP $HTTP:"; cat /tmp/bm_resp.json;
+          echo "BenchModel returned HTTP $HTTP:"; cat /tmp/bm_resp.json; echo
+          echo "---- request diagnostics ----"
+          echo "URL: $BM_API/api/reviews"
+          echo "Body: ${BODY_BYTES} bytes; starts: $(head -c 60 /tmp/bm_body.json)"
+          echo "Proxy env: http_proxy='${http_proxy:-}' https_proxy='${https_proxy:-}' HTTPS_PROXY='${HTTPS_PROXY:-}'"
+          echo "---- verbose exchange (token redacted) ----"
+          curl -v -sS --http1.1 -H "Expect:" -o /dev/null -X POST "$BM_API/api/reviews" \
+            -H "Authorization: Bearer $BM_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/bm_body.json 2>&1 \
+            | sed -E 's/(Bearer )[A-Za-z0-9_.-]+/\1[REDACTED]/' | grep -E '^[*<>]' | head -n 60 || true
+          # A 4xx here usually means a bad/expired token, no stored provider key, or an oversized diff.
           exit 1
         fi
-
         N=$(jq '.findings | length' /tmp/bm_resp.json)
         echo "Findings: $N"
 

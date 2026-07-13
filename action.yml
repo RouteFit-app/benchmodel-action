@@ -50,6 +50,9 @@ runs:
           echo "No pull_request in context; this action runs on pull_request events. Skipping."
           exit 0
         fi
+        BM_TOKEN="$(printf '%s' "$BM_TOKEN" | tr -d '[:space:]')"
+        BM_MODEL="$(printf '%s' "$BM_MODEL" | tr -d '[:space:]')"
+        BM_API="$(printf '%s' "$BM_API" | tr -d '[:space:]')"
 
         echo "Fetching diff for PR #$PR_NUMBER in $GH_REPO ..."
         gh pr diff "$PR_NUMBER" --repo "$GH_REPO" > /tmp/bm_diff.txt || {

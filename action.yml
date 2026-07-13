@@ -68,10 +68,18 @@ runs:
           '{reviewer_ai:$m, writer_summary:"Automated pull-request review via GitHub Action", output:.}' \
           < /tmp/bm_diff.txt > /tmp/bm_body.json
 
+        BODY_BYTES=$(wc -c < /tmp/bm_body.json | tr -d ' ')
+        echo "Request body: ${BODY_BYTES} bytes"
+        if ! jq -e . /tmp/bm_body.json >/dev/null 2>&1; then
+          echo "Built an invalid or empty request body (jq produced nothing usable). Aborting."
+          echo "First 200 bytes of the fetched diff:"; head -c 200 /tmp/bm_diff.txt; echo
+          exit 1
+        fi
+
         HTTP=$(curl -sS -o /tmp/bm_resp.json -w "%{http_code}" -X POST "$BM_API/api/reviews" \
           -H "Authorization: Bearer $BM_TOKEN" \
           -H "Content-Type: application/json" \
-          --data @/tmp/bm_body.json) || { echo "Request to BenchModel failed."; exit 1; }
+          --data-binary @/tmp/bm_body.json) || { echo "Request to BenchModel failed."; exit 1; }
 
         if [ "$HTTP" != "200" ]; then
           echo "BenchModel returned HTTP $HTTP:"; cat /tmp/bm_resp.json;

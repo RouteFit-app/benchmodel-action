@@ -39,13 +39,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4        # REQUIRED: this action reads files from the repo
-      - uses: RouteFit-app/benchmodel-action/mcp-scan@v1
+      - uses: RouteFit-app/benchmodel-action/mcp-scan@main
         with:
           fail-on: high
 ```
 
 **`actions/checkout` is required.** This action scans files on disk, so without a checkout there's
 nothing to look at and it will find no configs (and pass).
+
+**On `@main`:** there's no `v1` tag covering this action yet, so `@main` is what works today.
+It's also unpinned, which is the exact thing `unpinned_package` above flags, and the criticism
+lands the same way here: `@main` means you run whatever we pushed last. If that bothers you, and
+it reasonably might, pin the SHA instead:
+`RouteFit-app/benchmodel-action/mcp-scan@<commit-sha>`. A tagged release is coming.
 
 ## Inputs
 

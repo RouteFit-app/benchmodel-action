@@ -73,9 +73,155 @@ _INJECTION = [
     "actually your task", "override the", "bypass the", "authorized override",
 ]
 
+# Container runtimes with isolation switched back off. GATED on the runtime actually
+# being invoked: "--privileged" means nothing outside docker/podman, and an ungated
+# match would fire on unrelated args. The gate matters more than the rule.
+_CONTAINER_CMDS = {"docker", "podman", "nerdctl", "docker-compose", "podman-compose"}
+_CONTAINER_RUN = re.compile(r"\b(?:docker|podman|nerdctl)\s+(?:run|create|exec|compose)\b", re.I)
+_PRIVILEGED = re.compile(r"--privileged\b|--cap-add[=\s]+(?:ALL|SYS_ADMIN|SYS_PTRACE|SYS_MODULE)", re.I)
+_HOST_NS = re.compile(r"--(?:network|net|pid|ipc|uts)[=\s]+host\b", re.I)
+_HOST_ROOT_MOUNT = re.compile(r"(?:-v|--volume)[=\s]+/:|--mount[=\s][^\n]*?\bsource=/(?:[,\s\"']|$)", re.I)
+_DOCKER_SOCK = re.compile(r"docker\.sock", re.I)
+_UNCONFINED = re.compile(r"--security-opt[=\s]+(?:seccomp|apparmor)=unconfined", re.I)
+
+# PowerShell flags that disable a control or hide what runs. Also gated. Deliberately
+# NOT flagging -NoProfile alone: legitimate launchers use it constantly, so it's noise.
+_PS_INVOKED = re.compile(r"\b(?:powershell|pwsh)(?:\.exe)?\b", re.I)
+_PS_BYPASS = re.compile(r"-(?:executionpolicy|execpolicy|exec|ep)[\s:=]+(?:bypass|unrestricted)", re.I)
+_PS_ENCODED = re.compile(r"-(?:encodedcommand|encoded|enc|e)[\s:=]+[A-Za-z0-9+/=]{16,}", re.I)
+_PS_HIDDEN = re.compile(r"-(?:windowstyle|w)[\s:=]+hidden", re.I)
+
+# Credentials inline in a connection URI.
+_DB_URI = re.compile(
+    r"\b(postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?|mssql|clickhouse|ftp)"
+    r"://[^\s:/@\"']+:([^\s@/\"']+)@",
+    re.I,
+)
+# A variable reference in the password slot is the CORRECT pattern. Never flag the
+# right answer. Placeholders and local-dev defaults are excluded for the same reason:
+# firing on "postgres://postgres:postgres@localhost" is how a scanner loses trust.
+_VAR_ONLY = re.compile(r"^(?:\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)$")
+_PLACEHOLDER_PW = {
+    "password", "passwd", "pass", "secret", "changeme", "change_me", "placeholder",
+    "yourpassword", "your_password", "mypassword", "example", "test", "postgres",
+    "root", "admin", "guest", "xxx", "xxxx", "xxxxx", "***", "redacted",
+}
+
+# Host paths that hand the agent a credential store. Narrow on purpose: "/etc" as a
+# whole is not a finding (/etc/ssl/certs is normal), /etc/shadow is. /tmp is not
+# listed either, legitimate servers use it constantly.
+_SENSITIVE_PATHS = [
+    # Trailing separator is optional: the common case is a mount like
+    # "-v /home/u/.ssh:/root/.ssh", where .ssh is followed by ':' not '/'.
+    (re.compile(r"\.ssh(?:[/\\:\"'\s]|$)", re.I), "your SSH directory (~/.ssh)"),
+    (re.compile(r"\bid_(?:rsa|dsa|ecdsa|ed25519)\b", re.I), "an SSH private key"),
+    (re.compile(r"[/\\]etc[/\\](?:shadow|sudoers|passwd)\b", re.I), "system account files (/etc/shadow, /etc/passwd)"),
+    (re.compile(r"\.aws[/\\]credentials\b", re.I), "your AWS credentials file"),
+    (re.compile(r"\.kube[/\\]config\b", re.I), "your kubeconfig (cluster credentials)"),
+    (re.compile(r"\.docker[/\\]config\.json\b", re.I), "your container registry credentials"),
+    (re.compile(r"[/\\]\.?netrc\b", re.I), "your .netrc credentials"),
+    (re.compile(r"\.git-credentials\b", re.I), "your stored git credentials"),
+]
+
 
 def _f(sev, rule, where, detail, fix):
     return {"severity": sev, "rule": rule, "where": where, "detail": detail, "fix": fix}
+
+
+def _article(word):
+    """'An Anthropic API key', not 'A Anthropic API key'."""
+    return "An" if word[:1].upper() in "AEIOU" else "A"
+
+
+def _scan_uri_credentials(text, where, out):
+    for m in _DB_URI.finditer(text):
+        scheme, pw = m.group(1), m.group(2)
+        if _VAR_ONLY.match(pw) or pw.lower() in _PLACEHOLDER_PW:
+            continue
+        out.append(_f("high", "credentials_in_connection_uri", where,
+                      f"{_article(scheme)} {scheme} connection string carries its password inline, so it's in git "
+                      f"history and in the process list of whatever launches this server.",
+                      "Move it to a variable resolved outside the manifest "
+                      "(scheme://user:${DB_PASSWORD}@host) and rotate the exposed one."))
+        return
+
+
+def _scan_sensitive_paths(text, where, out):
+    for pat, label in _SENSITIVE_PATHS:
+        if pat.search(text):
+            out.append(_f("medium", "sensitive_host_path", where,
+                          f"This points the server at {label}. An MCP server is untrusted code a "
+                          f"model can be talked into driving, so what it can read, an injection "
+                          f"can exfiltrate.",
+                          "Narrow the path to what the server needs. If it needs one credential, "
+                          "pass that value rather than the whole store."))
+            return
+
+
+def _scan_exec_flags(name, command, args, out):
+    """Dangerous flags on the resolved command line.
+
+    Matched against the JOINED line, not per-arg, because these appear both as real
+    argv (command="docker", args=["run","--privileged"]) and buried in a single shell
+    string (command="bash", args=["-c","docker run --privileged ..."]).
+    """
+    line = " ".join([command] + args)
+    base = command.strip().split("/")[-1].split("\\")[-1].lower()
+    where = f"{name}.args"
+
+    if base in _CONTAINER_CMDS or _CONTAINER_RUN.search(line):
+        if _PRIVILEGED.search(line):
+            out.append(_f("high", "container_privileged", where,
+                          "Container runs --privileged (or with SYS_ADMIN). That switches off the "
+                          "isolation the container existed to provide; escaping to the host from "
+                          "there is a documented one-liner.",
+                          "Drop --privileged. Add back only the capability needed "
+                          "(--cap-drop=ALL --cap-add=<one>)."))
+        if _HOST_ROOT_MOUNT.search(line):
+            out.append(_f("high", "container_host_root_mount", where,
+                          "The host filesystem root is mounted in, so the server can read and "
+                          "write every file on the machine, including your keys.",
+                          "Mount only the directory the server needs, read-only where possible."))
+        if _HOST_NS.search(line):
+            out.append(_f("medium", "container_host_namespace", where,
+                          "Container shares a host namespace (--net/--pid/--ipc=host), removing "
+                          "that boundary. Host networking reaches localhost-bound services; host "
+                          "PID exposes every process.",
+                          "Remove the flag. Publish the specific port instead of --net=host."))
+        if _UNCONFINED.search(line):
+            out.append(_f("medium", "container_unconfined", where,
+                          "seccomp/AppArmor set to unconfined, disabling the syscall filter that "
+                          "blocks common container-escape primitives.",
+                          "Remove the --security-opt override; keep the default profile."))
+
+    if _DOCKER_SOCK.search(line):
+        out.append(_f("high", "docker_socket_exposed", where,
+                      "The Docker socket is exposed to this server. Anything that can talk to it "
+                      "can start a privileged container mounting the host, so this grants root. "
+                      "No exploit needed, it's the documented API.",
+                      "Don't pass the socket through. If the Docker API is genuinely needed, front "
+                      "it with a proxy that allowlists specific calls."))
+
+    if base.startswith(("powershell", "pwsh")) or _PS_INVOKED.search(line):
+        if _PS_BYPASS.search(line):
+            out.append(_f("high", "powershell_policy_bypass", where,
+                          "PowerShell launched with -ExecutionPolicy Bypass/Unrestricted, which "
+                          "explicitly disables the script-signing check.",
+                          "Remove the flag. Sign the script, or invoke the binary directly."))
+        if _PS_ENCODED.search(line):
+            out.append(_f("high", "powershell_encoded_command", where,
+                          "PowerShell handed a base64 -EncodedCommand. It hides what runs from "
+                          "anyone reviewing the config, which is why it's standard payload "
+                          "packaging. A launcher has no reason to be unreadable.",
+                          "Replace with the plain command, or a reviewable script file."))
+        if _PS_HIDDEN.search(line):
+            out.append(_f("medium", "powershell_hidden_window", where,
+                          "PowerShell launched with a hidden window, so what it does (including "
+                          "prompting you) happens where you can't see it.",
+                          "Remove -WindowStyle Hidden."))
+
+    _scan_uri_credentials(line, where, out)
+    _scan_sensitive_paths(line, where, out)
 
 
 def _scan_env(name, env, out):
@@ -87,10 +233,12 @@ def _scan_env(name, env, out):
         for pat, label in _SECRETS:
             if pat.search(v):
                 out.append(_f("high", "plaintext_secret_in_env", f"{name}.env.{k}",
-                              f"A {label} is hardcoded in this config. Anything that reads the file "
+                              f"{_article(label)} {label} is hardcoded in this config. Anything that reads the file "
                               f"gets the key, and it's now in git history.",
                               "Reference a variable resolved outside the manifest and rotate the key."))
                 break
+        _scan_uri_credentials(v, f"{name}.env.{k}", out)
+        _scan_sensitive_paths(v, f"{name}.env.{k}", out)
 
 
 def _scan_stdio(name, cfg, out):
@@ -138,6 +286,9 @@ def _scan_stdio(name, cfg, out):
             out.append(_f("medium", "auto_confirm_install", f"{name}.args",
                           f"{auto[0]!r} auto-confirms fetch-and-execute with no prompt.",
                           "Drop the auto-confirm flag or pre-install the pinned package."))
+
+    # Container escapes, PowerShell bypasses, inline creds, credential paths.
+    _scan_exec_flags(name, command, args, out)
 
 
 def _scan_url(name, cfg, out):

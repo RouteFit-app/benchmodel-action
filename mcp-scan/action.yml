@@ -1,0 +1,65 @@
+name: "BenchModel MCP Config Scan"
+description: "Fail a PR when someone commits a dangerous MCP server config. Static analysis, runs entirely in your runner, nothing is uploaded."
+author: "BenchModel"
+branding:
+  icon: "shield"
+  color: "purple"
+
+inputs:
+  paths:
+    description: "Space-separated config files to scan. Default: auto-discover (.mcp.json, mcp.json, .cursor/mcp.json, .vscode/mcp.json, claude_desktop_config.json, **/*.mcp.json)."
+    required: false
+    default: ""
+  fail-on:
+    description: "Fail the check at this severity or above: 'high', 'medium', or 'none' (comment only)."
+    required: false
+    default: "high"
+  comment:
+    description: "Post the results as a PR comment (needs pull-requests: write). 'true' or 'false'."
+    required: false
+    default: "true"
+  github-token:
+    description: "Token used to post the comment. The default workflow token is fine."
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: BenchModel MCP config scan
+      shell: bash
+      env:
+        BM_PATHS: ${{ inputs.paths }}
+        BM_FAIL_ON: ${{ inputs.fail-on }}
+        BM_COMMENT: ${{ inputs.comment }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        # Inputs can arrive with a trailing newline from a secret/variable; a newline
+        # in an arg silently breaks the command line, so strip whitespace up front.
+        BM_FAIL_ON="$(printf '%s' "$BM_FAIL_ON" | tr -d '[:space:]')"
+        BM_COMMENT="$(printf '%s' "$BM_COMMENT" | tr -d '[:space:]')"
+
+        echo "Scanning MCP configs (fail-on=$BM_FAIL_ON) ..."
+
+        # Human-readable output in the log, always.
+        set +e
+        python3 "${{ github.action_path }}/scan.py" $BM_PATHS --fail-on "$BM_FAIL_ON"
+        RC=$?
+        set -e
+
+        # Markdown for the PR comment. Never let a comment failure change the verdict:
+        # the scan's exit code is the gate, commenting is a convenience.
+        if [ "$BM_COMMENT" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
+          set +e
+          python3 "${{ github.action_path }}/scan.py" $BM_PATHS --fail-on none --format markdown > /tmp/bm_mcp.md
+          set -e
+          if [ -s /tmp/bm_mcp.md ]; then
+            gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body-file /tmp/bm_mcp.md \
+              || echo "Could not post comment (needs 'pull-requests: write'); continuing."
+          fi
+        fi
+
+        exit $RC

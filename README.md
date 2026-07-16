@@ -61,6 +61,19 @@ through BenchModel, and posts a comment with a severity/location/issue table plu
 collapsible suggested fixes. With `fail-on` set, it exits non-zero when a finding
 meets the threshold, so branch protection can block the merge.
 
+## Advisory by default
+
+Out of the box the check is **advisory**: it posts the review as a comment and
+passes (green), even when it flags a high-severity issue. That is intentional. A
+green check means the review ran, not that the code is clean, so read the comment.
+
+Blocking merges is a deliberate opt-in. AI reviewers are useful but not perfect,
+so the sensible path is to run advisory for a while, see how the model's calls
+land on your own code, and only then gate. When you trust it, uncomment
+`fail-on: high` (blocks on high-severity findings only, ignoring medium and low
+noise) and add the check to branch protection. Set `fail-on: medium` if you want
+a stricter gate. There is no reason to force-block from day one.
+
 ## Notes
 
 - **Cost is yours and bounded.** The review uses your provider key; `max-chars`

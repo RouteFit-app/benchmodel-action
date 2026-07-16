@@ -58,7 +58,7 @@ it reasonably might, pin the SHA instead:
 | input | default | description |
 |---|---|---|
 | `paths` | *(auto-discover)* | Space-separated config files. Default looks for `.mcp.json`, `mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.claude/mcp.json`, `claude_desktop_config.json`, `**/*.mcp.json`. |
-| `fail-on` | `high` | Fail the check at this severity or above: `high`, `medium`, or `none` (comment only). |
+| `fail-on` | `high` | Fail the check at this severity or above: `high`, `medium`, or `none` (comment only). There is deliberately no `low`: advisory findings are reported, never blocking. |
 | `comment` | `true` | Post results as a PR comment. Needs `pull-requests: write`. |
 | `github-token` | `${{ github.token }}` | Token used to post the comment. The default is fine. |
 
@@ -106,9 +106,25 @@ A repo with no MCP configs passes silently. It will never fail a build for not h
 |---|---|---|
 | `tool_description_injection` | high | Imperative text in a tool description. Descriptions are fed to the model as trusted context. |
 | `package_from_remote_source` | high | Package installed from a URL/git source, no provenance. |
-| `unpinned_package` | medium | `npx`/`uvx`/`pip` with no version pin: every start fetches latest. |
-| `auto_confirm_install` | medium | `-y`/`--force` auto-confirms fetch-and-execute. |
 | `insecure_transport` | medium | `http://` MCP endpoint: tool definitions rewritable in transit. |
+| `unpinned_package` | low | `npx`/`uvx`/`pip` with no version pin: every start fetches latest. |
+| `auto_confirm_install` | low | `-y`/`--force` auto-confirms fetch-and-execute. |
+
+### Why the two `npx` rules are `low`
+
+`npx -y @scope/server-x` is what the official MCP quickstart tells you to write, so
+these two fire on nearly every config that exists. They are still real: if a package
+ever ships a bad release, every unpinned config runs it at next start with whatever
+is in `env`, which for the official GitHub server is a personal access token.
+
+But an unpinned dependency is a **latent** risk, not a present defect. Nothing is
+compromised today; a bad release has to ship first. That's a `low`, and `low` never
+fails the check at any `fail-on` setting, including `medium`. You'll see them in the
+comment. They will not turn your build red.
+
+We didn't demote them because the finding is unpopular. We demoted them because
+"latent" and "present" are different things, and a scanner that inflates one into the
+other to look thorough is the kind you learn to ignore.
 
 ## What it deliberately does NOT flag
 

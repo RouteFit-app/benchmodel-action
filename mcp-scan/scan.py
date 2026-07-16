@@ -318,13 +318,21 @@ def _scan_stdio(name, cfg, out):
                 out.append(_f("high", "package_from_remote_source", f"{name}.args",
                               f"{p!r} installs from a URL/git source with no published provenance.",
                               "Install from the registry with a pinned version."))
+        # `npx -y @scope/pkg` is what the official MCP quickstart tells people to
+        # write, so these two fire on nearly every config in existence. Low, not
+        # medium, and the reason matters: an unpinned dep is a LATENT risk, not a
+        # present defect. Nothing is compromised today; a bad release would have to
+        # ship first. Not deleted, because if a bad release ever does ship, every
+        # unpinned config runs it at next start with whatever is in env. `low` is
+        # excluded from every fail path, so this can never break a build. Both rules
+        # move together: they describe one pattern.
         if pkgs and not pinned:
-            out.append(_f("medium", "unpinned_package", f"{name}.args",
+            out.append(_f("low", "unpinned_package", f"{name}.args",
                           f"{base} runs {pkgs[0]!r} unpinned, so every start fetches whatever is latest.",
                           f"Pin an exact version (e.g. {pkgs[0]}@1.2.3).",
                           subject=pkgs[0]))
         if auto and pkgs:
-            out.append(_f("medium", "auto_confirm_install", f"{name}.args",
+            out.append(_f("low", "auto_confirm_install", f"{name}.args",
                           f"{auto[0]!r} auto-confirms fetch-and-execute with no prompt.",
                           "Drop the auto-confirm flag or pre-install the pinned package.",
                           subject=auto[0]))
@@ -424,11 +432,15 @@ def main():
 
     highs = [f for f in all_findings if f["severity"] == "high"]
     meds = [f for f in all_findings if f["severity"] == "medium"]
+    # Counted and printed, never failed on. The npx rules land here, and they'd be
+    # invisible in CI if the summary only tallied high/medium.
+    lows = [f for f in all_findings if f["severity"] == "low"]
 
     if a.format == "markdown":
         print("## 🛡️ BenchModel MCP config scan\n")
         print(f"Scanned **{scanned}** config file(s). "
-              f"**{len(highs)} high**, **{len(meds)} medium**.\n")
+              f"**{len(highs)} high**, **{len(meds)} medium**, "
+              f"{len(lows)} low (advisory, never fails the check).\n")
         if not all_findings:
             print("No known config-level vectors found. (This checks configuration patterns, "
                   "not the MCP server's runtime code.)")
@@ -447,7 +459,8 @@ def main():
     else:
         for path, err in bad:
             print(f"skip {path}: {err}")
-        print(f"Scanned {scanned} config file(s): {len(highs)} high, {len(meds)} medium.")
+        print(f"Scanned {scanned} config file(s): {len(highs)} high, {len(meds)} medium, "
+              f"{len(lows)} low (advisory).")
         for f in all_findings:
             print(f"  [{f['severity']:6}] {f['file']} :: {f['where']} :: {f['rule']}")
             print(f"           {f['detail']}")

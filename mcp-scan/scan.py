@@ -124,8 +124,45 @@ _SENSITIVE_PATHS = [
 ]
 
 
-def _f(sev, rule, where, detail, fix):
-    return {"severity": sev, "rule": rule, "where": where, "detail": detail, "fix": fix}
+def _f(sev, rule, where, detail, fix, subject=None):
+    """`subject` is the specific thing that tripped the rule (package, key type,
+    URI scheme). It lets _dedupe merge a rule across servers without losing which
+    packages/keys were involved. Dropped before output."""
+    f = {"severity": sev, "rule": rule, "where": where, "detail": detail, "fix": fix}
+    if subject:
+        f["subject"] = subject
+    return f
+
+
+def _dedupe(findings):
+    """One rule firing on N servers is one problem, not N.
+
+    The official MCP quickstart tells people to write `npx -y @scope/server-x`, so a
+    normal 3-server config produced six near-identical medium findings (unpinned x3,
+    auto-confirm x3) that buried the ones that actually differed. Fold each rule into
+    a single entry listing every location it hit.
+    """
+    groups, order = {}, []
+    for f in findings:
+        if f["rule"] not in groups:
+            groups[f["rule"]] = []
+            order.append(f["rule"])
+        groups[f["rule"]].append(f)
+
+    out = []
+    for rule in order:
+        g = groups[rule]
+        merged = dict(g[0])
+        if len(g) > 1:
+            wheres = list(dict.fromkeys(x["where"] for x in g))
+            merged["where"] = ", ".join(wheres)
+            merged["count"] = len(g)
+            subjects = list(dict.fromkeys(x["subject"] for x in g if x.get("subject")))
+            if len(subjects) > 1:
+                merged["detail"] = merged["detail"].rstrip() + " Same for " + ", ".join(subjects[1:]) + "."
+        merged.pop("subject", None)
+        out.append(merged)
+    return out
 
 
 def _article(word):
@@ -142,7 +179,8 @@ def _scan_uri_credentials(text, where, out):
                       f"{_article(scheme)} {scheme} connection string carries its password inline, so it's in git "
                       f"history and in the process list of whatever launches this server.",
                       "Move it to a variable resolved outside the manifest "
-                      "(scheme://user:${DB_PASSWORD}@host) and rotate the exposed one."))
+                      "(scheme://user:${DB_PASSWORD}@host) and rotate the exposed one.",
+                      subject=scheme))
         return
 
 
@@ -154,7 +192,8 @@ def _scan_sensitive_paths(text, where, out):
                           f"model can be talked into driving, so what it can read, an injection "
                           f"can exfiltrate.",
                           "Narrow the path to what the server needs. If it needs one credential, "
-                          "pass that value rather than the whole store."))
+                          "pass that value rather than the whole store.",
+                          subject=label))
             return
 
 
@@ -235,7 +274,8 @@ def _scan_env(name, env, out):
                 out.append(_f("high", "plaintext_secret_in_env", f"{name}.env.{k}",
                               f"{_article(label)} {label} is hardcoded in this config. Anything that reads the file "
                               f"gets the key, and it's now in git history.",
-                              "Reference a variable resolved outside the manifest and rotate the key."))
+                              "Reference a variable resolved outside the manifest and rotate the key.",
+                              subject=label))
                 break
         _scan_uri_credentials(v, f"{name}.env.{k}", out)
         _scan_sensitive_paths(v, f"{name}.env.{k}", out)
@@ -281,11 +321,13 @@ def _scan_stdio(name, cfg, out):
         if pkgs and not pinned:
             out.append(_f("medium", "unpinned_package", f"{name}.args",
                           f"{base} runs {pkgs[0]!r} unpinned, so every start fetches whatever is latest.",
-                          f"Pin an exact version (e.g. {pkgs[0]}@1.2.3)."))
+                          f"Pin an exact version (e.g. {pkgs[0]}@1.2.3).",
+                          subject=pkgs[0]))
         if auto and pkgs:
             out.append(_f("medium", "auto_confirm_install", f"{name}.args",
                           f"{auto[0]!r} auto-confirms fetch-and-execute with no prompt.",
-                          "Drop the auto-confirm flag or pre-install the pinned package."))
+                          "Drop the auto-confirm flag or pre-install the pinned package.",
+                          subject=auto[0]))
 
     # Container escapes, PowerShell bypasses, inline creds, credential paths.
     _scan_exec_flags(name, command, args, out)
@@ -334,6 +376,9 @@ def scan_config(data):
     nested = any(isinstance(c, dict) and "tools" in c for c in servers.values())
     if data.get("tools") and not nested:
         _scan_tools("(manifest)", data, findings)
+    # Merge before counting: the summary should reflect distinct problems, not how
+    # many servers happen to share one.
+    findings = _dedupe(findings)
     findings.sort(key=lambda f: SEV_ORDER.get(f["severity"], 9))
     return findings, len(servers)
 

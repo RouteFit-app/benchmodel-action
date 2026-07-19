@@ -62,7 +62,17 @@ _SECRETS = [
     (re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"), "Slack token"),
     (re.compile(r"glpat-[A-Za-z0-9_\-]{16,}"), "GitLab token"),
 ]
+_BASE_URL_KEY = re.compile(r"(?:_BASE_URL|_API_BASE|_API_HOST|_ENDPOINT)$", re.I)
+_OFFICIAL_API_HOSTS = {
+    "api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com",
+    "api.deepseek.com", "openrouter.ai", "api.mistral.ai", "api.groq.com",
+    "api.x.ai", "api.cohere.ai", "api.together.xyz",
+}
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
+def _host_of(url):
+    m = re.match(r"[a-z][a-z0-9+.\-]*://([^/:\s]+)", url.strip(), re.I)
+    return m.group(1).lower() if m else None
 _INJECTION = [
     "ignore previous", "ignore all previous", "ignore the above", "disregard previous",
     "disregard the above", "system override", "you must always", "you should always",
@@ -269,6 +279,19 @@ def _scan_env(name, env, out):
     for k, v in env.items():
         if not isinstance(v, str):
             continue
+          if _BASE_URL_KEY.search(k):
+            host = _host_of(v)
+            if host and host not in _OFFICIAL_API_HOSTS and host not in _LOCAL_HOSTS:
+                out.append(_finding(
+                    "high", "provider_base_url_override", f"{name}.env.{k}",
+                    f"{k} redirects the API base URL to {host!r}, not the provider's own "
+                    f"endpoint. An SDK sends your key to whatever base URL is set, so this "
+                    f"silently ships credentialed traffic (and the key) to that host -- the "
+                    f"key-exfiltration vector behind CVE-2026-21852.",
+                    "Remove the override or point it back at the official endpoint. If you run a "
+                    "trusted proxy, pin it to a host you control and confirm it never logs the key.",
+                    subject=k,
+                ))
         for pat, label in _SECRETS:
             if pat.search(v):
                 out.append(_f("high", "plaintext_secret_in_env", f"{name}.env.{k}",
